@@ -19,6 +19,7 @@ import {
   ChevronRight,
   Keyboard,
 } from "lucide-react";
+import { localStore } from "./storage";
 
 const c = {
   bg: "#F4F2ED",
@@ -85,7 +86,7 @@ export default function BudgetApp() {
   useEffect(() => {
     (async () => {
       try {
-        const res = await window.storage.get(STORAGE_KEY, false);
+        const res = await localStore.get(STORAGE_KEY);
         if (res && res.value) {
           const parsed = JSON.parse(res.value);
           setState({ stores: [], productMap: {}, ...DEFAULT_STATE, ...parsed });
@@ -102,23 +103,30 @@ export default function BudgetApp() {
 
   const persist = useCallback(async (next) => {
     try {
-      const result = await window.storage.set(STORAGE_KEY, JSON.stringify(next), false);
+      const result = await localStore.set(STORAGE_KEY, JSON.stringify(next));
       setSaveError(!result);
     } catch (e) {
       setSaveError(true);
     }
   }, []);
 
-  const update = useCallback(
-    (updater) => {
-      setState((prev) => {
-        const next = typeof updater === "function" ? updater(prev) : updater;
-        persist(next);
-        return next;
-      });
-    },
-    [persist]
-  );
+  // التحديث والحفظ منفصلين تمامًا: setState بس تحدّث الشاشة (بدون أي أثر جانبي)،
+  // وeffect لحاله مسؤول عن الحفظ كل ما تتغيّر الحالة فعليًا. هيك بنضمن إنه
+  // ينحفظ آخر نسخة صحيحة دايمًا، ومافي احتمال يصير الحفظ بنسخة قديمة فوق الجديدة.
+  const update = useCallback((updater) => {
+    setState((prev) => (typeof updater === "function" ? updater(prev) : updater));
+  }, []);
+
+  const didMountRef = useRef(false);
+  useEffect(() => {
+    if (!state) return;
+    if (!didMountRef.current) {
+      // أول مرة تتحمّل الحالة (من التحميل الأولي) — ما في داعي نعيد حفظ نفس الشي
+      didMountRef.current = true;
+      return;
+    }
+    persist(state);
+  }, [state, persist]);
 
   const totals = useMemo(() => {
     if (!state) return null;
@@ -134,9 +142,8 @@ export default function BudgetApp() {
     return { totalBills, emergencyAmount, spendablePool, totalPurchases, remaining, billsPct, emgPct, spendPct, salaryN };
   }, [state]);
 
-  async function resetAll() {
-    setState(DEFAULT_STATE);
-    await persist(DEFAULT_STATE);
+  function resetAll() {
+    update(() => DEFAULT_STATE);
   }
 
   if (loading || !state || !totals) {
@@ -149,12 +156,12 @@ export default function BudgetApp() {
   }
 
   return (
-    <div dir="rtl" style={{ background: "#DDDCD3", fontFamily: "'Tajawal', sans-serif" }} className="min-h-screen flex items-center justify-center py-6 px-3">
+    <div dir="rtl" style={{ background: "#DDDCD3", fontFamily: "'Tajawal', sans-serif" }} className="min-h-screen flex items-center justify-center sm:py-6 sm:px-3">
       <style>{fontImport}</style>
 
       <div
         style={{ background: c.bg, color: c.ink, boxShadow: "0 30px 60px -20px rgba(40,45,35,0.35)" }}
-        className="w-full max-w-[420px] h-[820px] max-h-[92vh] rounded-[2.2rem] overflow-hidden flex flex-col relative"
+        className="w-full h-[100dvh] sm:max-w-[420px] sm:h-[820px] sm:max-h-[92vh] rounded-none sm:rounded-[2.2rem] overflow-hidden flex flex-col relative"
       >
         <div style={{ background: c.bg }} className="pt-4 px-6 pb-2 flex items-center justify-between shrink-0">
           <div style={{ fontFamily: "'Cairo', sans-serif" }} className="font-extrabold text-lg">
@@ -516,15 +523,17 @@ function BarcodeField({ value, onChange, productMap, onProductInfo }) {
     setLookup("checking");
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 8000);
+    // ننتظر شوي قبل ما نبعت الطلب، عشان ما نطلق طلب شبكة مع كل حرف وانت لسا تكتب
     const debounce = setTimeout(async () => {
       try {
         const res = await fetch(
-          `https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(code)}.json?fields=product_name,product_name_ar,brands,quantity,categories,image_front_small_url,status`,
+          `/api/lookup?barcode=${encodeURIComponent(code)}`,
           { signal: controller.signal }
         );
         if (cancelled) return;
 
         if (!res.ok) {
+          // الطلب وصل للسيرفر بس رجع خطأ (مثلاً 404/500) — هذا مش نفس معنى "ما في نت"
           console.error("Open Food Facts responded with", res.status);
           setLookup("api-error");
           return;
@@ -554,6 +563,7 @@ function BarcodeField({ value, onChange, productMap, onProductInfo }) {
         if (e.name === "AbortError") {
           setLookup("timeout-error");
         } else {
+          // فشل فعلي بالشبكة (DNS، أوفلاين، أو حظر من المتصفح/الشبكة)
           setLookup("offline-error");
         }
       } finally {
