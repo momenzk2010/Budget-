@@ -19,7 +19,6 @@ import {
   ChevronRight,
   Keyboard,
 } from "lucide-react";
-import { localStore } from "./storage";
 
 const c = {
   bg: "#F4F2ED",
@@ -86,7 +85,7 @@ export default function BudgetApp() {
   useEffect(() => {
     (async () => {
       try {
-        const res = await localStore.get(STORAGE_KEY);
+        const res = await window.storage.get(STORAGE_KEY, false);
         if (res && res.value) {
           const parsed = JSON.parse(res.value);
           setState({ stores: [], productMap: {}, ...DEFAULT_STATE, ...parsed });
@@ -103,7 +102,7 @@ export default function BudgetApp() {
 
   const persist = useCallback(async (next) => {
     try {
-      const result = await localStore.set(STORAGE_KEY, JSON.stringify(next));
+      const result = await window.storage.set(STORAGE_KEY, JSON.stringify(next), false);
       setSaveError(!result);
     } catch (e) {
       setSaveError(true);
@@ -150,12 +149,12 @@ export default function BudgetApp() {
   }
 
   return (
-    <div dir="rtl" style={{ background: "#DDDCD3", fontFamily: "'Tajawal', sans-serif" }} className="min-h-screen flex items-center justify-center sm:py-6 sm:px-3">
+    <div dir="rtl" style={{ background: "#DDDCD3", fontFamily: "'Tajawal', sans-serif" }} className="min-h-screen flex items-center justify-center py-6 px-3">
       <style>{fontImport}</style>
 
       <div
         style={{ background: c.bg, color: c.ink, boxShadow: "0 30px 60px -20px rgba(40,45,35,0.35)" }}
-        className="w-full h-[100dvh] sm:max-w-[420px] sm:h-[820px] sm:max-h-[92vh] rounded-none sm:rounded-[2.2rem] overflow-hidden flex flex-col relative"
+        className="w-full max-w-[420px] h-[820px] max-h-[92vh] rounded-[2.2rem] overflow-hidden flex flex-col relative"
       >
         <div style={{ background: c.bg }} className="pt-4 px-6 pb-2 flex items-center justify-between shrink-0">
           <div style={{ fontFamily: "'Cairo', sans-serif" }} className="font-extrabold text-lg">
@@ -517,14 +516,20 @@ function BarcodeField({ value, onChange, productMap, onProductInfo }) {
     setLookup("checking");
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 8000);
-
-    (async () => {
+    const debounce = setTimeout(async () => {
       try {
         const res = await fetch(
           `https://world.openfoodfacts.org/api/v2/product/${encodeURIComponent(code)}.json?fields=product_name,product_name_ar,brands,quantity,categories,image_front_small_url,status`,
           { signal: controller.signal }
         );
-        if (!res.ok) throw new Error("bad-response");
+        if (cancelled) return;
+
+        if (!res.ok) {
+          console.error("Open Food Facts responded with", res.status);
+          setLookup("api-error");
+          return;
+        }
+
         const data = await res.json();
         if (cancelled) return;
         const p = data && data.product;
@@ -544,15 +549,22 @@ function BarcodeField({ value, onChange, productMap, onProductInfo }) {
           setLookup("not-found");
         }
       } catch (e) {
-        if (!cancelled) setLookup("offline-error");
+        if (cancelled) return;
+        console.error("Open Food Facts lookup failed:", e);
+        if (e.name === "AbortError") {
+          setLookup("timeout-error");
+        } else {
+          setLookup("offline-error");
+        }
       } finally {
         clearTimeout(timeout);
       }
-    })();
+    }, 500);
 
     return () => {
       cancelled = true;
       controller.abort();
+      clearTimeout(debounce);
       clearTimeout(timeout);
     };
   }, [value]);
@@ -729,6 +741,18 @@ function BarcodeField({ value, onChange, productMap, onProductInfo }) {
       {lookup === "offline-error" && (
         <div style={{ color: c.inkSoft }} className="text-[11px] mt-1.5">
           ما قدرنا نوصل للإنترنت للبحث عن المنتج — اكتب الاسم يدويًا، وبيتعرف عليه تلقائيًا أوفلاين بالمرة الجايه
+        </div>
+      )}
+
+      {lookup === "timeout-error" && (
+        <div style={{ color: c.inkSoft }} className="text-[11px] mt-1.5">
+          الاتصال طوّل أكتر من اللازم — جرب مرة ثانية، أو اكتب الاسم يدويًا
+        </div>
+      )}
+
+      {lookup === "api-error" && (
+        <div style={{ color: c.inkSoft }} className="text-[11px] mt-1.5">
+          صار خطأ مؤقت بقاعدة Open Food Facts (مش مشكلة بالإنترنت عندك) — اكتب الاسم يدويًا وبنحفظه إلك للمرة الجايه
         </div>
       )}
     </div>
